@@ -96,41 +96,42 @@ export default function Lucy() {
         setGeneratingImage(true);
 
         // Fetch components + render in parallel
-        const [compRes, renderRes] = await Promise.all([
-          fetch('/api/components', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ design: newDesign }),
-          }),
-          fetch('/api/render', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ design: newDesign }),
-          }),
-        ]);
+       // Étape 1 — Vérifie les composants dans Airtable AVANT le rendu
+const compRes = await fetch('/api/components', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ design: newDesign }),
+});
+const compData = await compRes.json();
+const foundComponents = compData.components || [];
+setComponents(foundComponents);
 
-        const compData = await compRes.json();
-setComponents(compData.components || []);
+// Étape 2 — Récupère la matière réelle disponible en stock
+const tissuReel = foundComponents.find(c => c.type === 'Tissu');
+const matiereReelle = tissuReel?.composition || newDesign.matiere;
+const designFinal = {
+  ...newDesign,
+  matiere: matiereReelle,
+  prompt_image: newDesign.prompt_image.replace(newDesign.matiere, matiereReelle),
+};
 
-// Notifie l'user si des substitutions ont eu lieu
-const substitutions = (compData.components || []).filter(c => c.source === 'similar');
-if (substitutions.length > 0) {
-  const msg = substitutions.map(c =>
-    `Je n'ai pas de "${c.originalNeed}" en stock — j'utilise "${c.nom}" qui s'en rapproche.`
-  ).join('\n');
-  setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
+// Étape 3 — Notifie l'user si substitution
+if (tissuReel?.source === 'similar') {
+  setMessages(prev => [...prev, {
+    role: 'assistant',
+    content: `Je n'ai pas de ${newDesign.matiere} en stock — j'utilise ${matiereReelle} qui s'en rapproche. Le rendu est généré avec cette matière.`,
+  }]);
 }
 
-const notFound = (compData.components || []).filter(c => c.source === 'a_creer');
-if (notFound.length > 0) {
-  const msg2 = notFound.map(c =>
-    `"${c.originalNeed}" n'est pas encore dans ma base — ce composant sera à sourcer.`
-  ).join('\n');
-  setMessages(prev => [...prev, { role: 'assistant', content: msg2 }]);
-}
+// Étape 4 — Génère le rendu avec la matière réelle
+const renderRes = await fetch('/api/render', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ design: designFinal }),
+});
 
-        if (!renderRes.ok) throw new Error('Erreur de génération d\'image.');
-        const renderData = await renderRes.json();
+if (!renderRes.ok) throw new Error('Erreur de génération d\'image.');
+const renderData = await renderRes.json();
 
         if (renderData.imageUrl) {
           setRenderedImage(renderData.imageUrl);
