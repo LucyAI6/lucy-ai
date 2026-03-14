@@ -1,8 +1,3 @@
-
-W a <wylem.lepori@gmail.com>
-02:48 (il y a 0 minute)
-À moi
-
 export default async function handler(req, res) {
 if (req.method !== 'POST') return res.status(405).end();
 
