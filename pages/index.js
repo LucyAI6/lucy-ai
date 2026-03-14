@@ -95,43 +95,64 @@ export default function Lucy() {
         setLoading(false);
         setGeneratingImage(true);
 
-        // Fetch components + render in parallel
-       // Étape 1 — Vérifie les composants dans Airtable AVANT le rendu
-const compRes = await fetch('/api/components', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ design: newDesign }),
-});
-const compData = await compRes.json();
-const foundComponents = compData.components || [];
-setComponents(foundComponents);
+        // Étape 1 — Composants Airtable EN PREMIER
+        const compRes = await fetch('/api/components', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ design: newDesign }),
+        });
+        const compData = await compRes.json();
+        const foundComponents = compData.components || [];
+        setComponents(foundComponents);
 
-// Étape 2 — Récupère la matière réelle disponible en stock
-const tissuReel = foundComponents.find(c => c.type === 'Tissu');
-const matiereReelle = tissuReel?.composition || newDesign.matiere;
-const designFinal = {
-  ...newDesign,
-  matiere: matiereReelle,
-  prompt_image: newDesign.prompt_image.replace(newDesign.matiere, matiereReelle),
-};
+        // Étape 2 — Notifie l'user sur les substitutions
+        const substitues = foundComponents.filter(c => c.source === 'similar');
+        const aSourcer = foundComponents.filter(c => c.source === 'a_creer');
 
-// Étape 3 — Notifie l'user si substitution
-if (tissuReel?.source === 'similar') {
-  setMessages(prev => [...prev, {
-    role: 'assistant',
-    content: `Je n'ai pas de ${newDesign.matiere} en stock — j'utilise ${matiereReelle} qui s'en rapproche. Le rendu est généré avec cette matière.`,
-  }]);
-}
+        if (substitues.length > 0) {
+          const msg = substitues.map(c =>
+            `Je n'ai pas de "${c.originalNeed}" en stock — j'utilise "${c.nom}" (${c.composition || c.type}) qui s'en rapproche.`
+          ).join('\n');
+          setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
+        }
+        if (aSourcer.length > 0) {
+          const msg2 = aSourcer.map(c =>
+            `"${c.originalNeed}" n'est pas encore dans ma base — ce composant sera à sourcer.`
+          ).join('\n');
+          setMessages(prev => [...prev, { role: 'assistant', content: msg2 }]);
+        }
 
-// Étape 4 — Génère le rendu avec la matière réelle
-const renderRes = await fetch('/api/render', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ design: designFinal }),
-});
+        // Étape 3 — Reconstruit le prompt avec les composants RÉELS
+        const tissuReel = foundComponents.find(c => c.type === 'Tissu');
+        const zipReel = foundComponents.find(c => c.type === 'Fermeture');
+        const matiereReelle = tissuReel?.composition || newDesign.matiere;
+        const couleurReelle = tissuReel?.couleur || newDesign.couleur;
 
-if (!renderRes.ok) throw new Error('Erreur de génération d\'image.');
-const renderData = await renderRes.json();
+        let promptFinal = newDesign.prompt_image;
+        // Remplace matière et couleur demandées par les vraies de la base
+        promptFinal = promptFinal.replace(new RegExp(newDesign.matiere, 'gi'), matiereReelle);
+        promptFinal = promptFinal.replace(new RegExp(newDesign.couleur, 'gi'), couleurReelle);
+        // Remplace la couleur du zip si on en a un réel
+        if (zipReel?.couleur) {
+          promptFinal = promptFinal.replace(/zipper/gi, `${zipReel.couleur} zipper`);
+        }
+
+        const designFinal = {
+          ...newDesign,
+          matiere: matiereReelle,
+          couleur: couleurReelle,
+          prompt_image: promptFinal,
+        };
+
+        // Étape 4 — Génère le rendu avec les vraies matières
+        const renderRes = await fetch('/api/render', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ design: designFinal }),
+        });
+
+        if (!renderRes.ok) throw new Error('Erreur de génération d\'image.');
+        const renderData = await renderRes.json();
 
         if (renderData.imageUrl) {
           setRenderedImage(renderData.imageUrl);
