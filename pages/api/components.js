@@ -16,6 +16,9 @@ const response = await fetch(
 );
 const data = await response.json();
 records = data.records || [];
+  console.log('Records trouvés:', records.length);
+console.log('Premier record fields:', JSON.stringify(records[0]?.fields, null, 2));
+console.log('Design reçu:', JSON.stringify(design, null, 2));
 } catch (e) {
 console.error('Airtable fetch error:', e);
 }
