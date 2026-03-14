@@ -110,7 +110,24 @@ export default function Lucy() {
         ]);
 
         const compData = await compRes.json();
-        setComponents(compData.components || []);
+setComponents(compData.components || []);
+
+// Notifie l'user si des substitutions ont eu lieu
+const substitutions = (compData.components || []).filter(c => c.source === 'similar');
+if (substitutions.length > 0) {
+  const msg = substitutions.map(c =>
+    `Je n'ai pas de "${c.originalNeed}" en stock — j'utilise "${c.nom}" qui s'en rapproche.`
+  ).join('\n');
+  setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
+}
+
+const notFound = (compData.components || []).filter(c => c.source === 'a_creer');
+if (notFound.length > 0) {
+  const msg2 = notFound.map(c =>
+    `"${c.originalNeed}" n'est pas encore dans ma base — ce composant sera à sourcer.`
+  ).join('\n');
+  setMessages(prev => [...prev, { role: 'assistant', content: msg2 }]);
+}
 
         if (!renderRes.ok) throw new Error('Erreur de génération d\'image.');
         const renderData = await renderRes.json();
