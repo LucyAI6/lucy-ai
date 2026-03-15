@@ -2,594 +2,297 @@ import { useState, useRef, useEffect } from 'react';
 import Head from 'next/head';
 
 const C = {
-  ivory: '#FAF8F4',
-  beige: '#EDE8DF',
-  sand: '#D6CCBC',
-  taupe: '#A89B8C',
-  mink: '#6B5E52',
-  noir: '#1C1714',
-  gold: '#C4A97D',
-  goldLt: '#E8D9C0',
-  green: '#2D6A4F',
+  ivory:  '#FAF8F4',
+  beige:  '#EDE8DF',
+  sand:   '#D6CCBC',
+  taupe:  '#A89B8C',
+  mink:   '#6B5E52',
+  noir:   '#1C1714',
+  gold:   '#C4A97D',
+  green:  '#2D6A4F',
+  orange: '#C4612D',
+};
+
+const BADGE = {
+  exact:     { bg: C.green,  label: '✓ En stock' },
+  similar:   { bg: C.gold,   label: '~ Similaire' },
+  not_found: { bg: C.taupe,  label: '◎ À sourcer' },
 };
 
 export default function Lucy() {
-  const [messages, setMessages] = useState([
-    {
-      role: 'assistant',
-      content: 'Bonjour ! Je suis Lucy. Décris-moi le vêtement que tu souhaites créer, ou uploade une photo d\'un vêtement qui t\'inspire et je le reproduis avec mes matières disponibles.',
-    },
-  ]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [generatingImage, setGeneratingImage] = useState(false);
-  const [design, setDesign] = useState(null);
-  const [components, setComponents] = useState([]);
-  const [renderedImage, setRenderedImage] = useState(null);
-  const [uploadedPreview, setUploadedPreview] = useState(null);
-  const [pendingImage, setPendingImage] = useState(null); // { base64, mediaType }
-  const [error, setError] = useState(null);
+  const [messages,       setMessages]       = useState([{
+    role: 'assistant',
+    content: "Bonjour ! Je suis Lucy 👗\nDécris-moi le vêtement que tu veux créer, ou uploade une photo d'inspiration — je le reproduis avec les matières disponibles dans ma base.",
+  }]);
+  const [input,          setInput]          = useState('');
+  const [loading,        setLoading]        = useState(false);
+  const [generating,     setGenerating]     = useState(false);
+  const [design,         setDesign]         = useState(null);
+  const [components,     setComponents]     = useState([]);
+  const [renderedImage,  setRenderedImage]  = useState(null);
+  const [preview,        setPreview]        = useState(null);
+  const [pendingImg,     setPendingImg]     = useState(null);
 
-  const messagesEndRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const textareaRef = useRef(null);
+  const bottomRef  = useRef(null);
+  const fileRef    = useRef(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
-  const handleImageSelect = (e) => {
+  const handleFile = e => {
     const file = e.target.files[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onloadend = () => {
-      const base64 = reader.result.split(',')[1];
-      setUploadedPreview(reader.result);
-      setPendingImage({ base64, mediaType: file.type });
+      setPreview(reader.result);
+      setPendingImg({ base64: reader.result.split(',')[1], mediaType: file.type });
     };
     reader.readAsDataURL(file);
-    // Reset file input so same file can be re-selected
     e.target.value = '';
   };
 
-  const sendMessage = async (text, imgData = null) => {
-    const trimmed = text.trim();
-    if (!trimmed && !imgData) return;
+  const send = async () => {
+    const text = input.trim();
+    if (!text && !pendingImg) return;
 
-    setError(null);
-    const imageToSend = imgData || pendingImage;
-    const userContent = trimmed || 'Reproduis ce vêtement avec tes matières disponibles.';
+    const userMsg = { role: 'user', content: text || 'Crée ce vêtement avec tes matières disponibles.' };
+    const history = [...messages, userMsg];
 
-    const userMessage = { role: 'user', content: userContent };
-    const newMessages = [...messages, userMessage];
-
-    setMessages(newMessages);
+    setMessages(history);
     setInput('');
-    setPendingImage(null);
-    setUploadedPreview(null);
+    setPreview(null);
+    const img = pendingImg;
+    setPendingImg(null);
     setLoading(true);
 
     try {
+      // ── 1. Analyse du prompt par Claude ──────────────────────────────────────
       const chatRes = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: newMessages,
-          imageBase64: imageToSend?.base64 || null,
-          imageMediaType: imageToSend?.mediaType || 'image/jpeg',
+          messages: history,
+          imageBase64:   img?.base64    || null,
+          imageMediaType: img?.mediaType || 'image/jpeg',
         }),
       });
-
-      if (!chatRes.ok) throw new Error('Erreur serveur — réessaie.');
+      if (!chatRes.ok) throw new Error('Erreur serveur.');
       const chatData = await chatRes.json();
 
-      if (chatData.type === 'design') {
-        // Design complete — start generation
-        const newDesign = chatData.data.design;
-        setDesign(newDesign);
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: chatData.data.message,
-        }]);
+      // Simple message — question ou refus
+      if (chatData.type === 'message') {
+        setMessages(prev => [...prev, { role: 'assistant', content: chatData.content }]);
         setLoading(false);
-        setGeneratingImage(true);
-
-        // Étape 1 — Composants Airtable EN PREMIER
-        const compRes = await fetch('/api/components', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ design: newDesign }),
-        });
-        const compData = await compRes.json();
-        const foundComponents = compData.components || [];
-        setComponents(foundComponents);
-
-        // Étape 2 — Notifie l'user sur les substitutions
-        const substitues = foundComponents.filter(c => c.source === 'similar');
-        const aSourcer = foundComponents.filter(c => c.source === 'a_creer');
-
-        if (substitues.length > 0) {
-          const msg = substitues.map(c =>
-            `Je n'ai pas de "${c.originalNeed}" en stock — j'utilise "${c.nom}" (${c.composition || c.type}) qui s'en rapproche.`
-          ).join('\n');
-          setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
-        }
-        if (aSourcer.length > 0) {
-          const msg2 = aSourcer.map(c =>
-            `"${c.originalNeed}" n'est pas encore dans ma base — ce composant sera à sourcer.`
-          ).join('\n');
-          setMessages(prev => [...prev, { role: 'assistant', content: msg2 }]);
-        }
-
-        // Étape 3 — Reconstruit le prompt avec les composants RÉELS
-        const tissuReel = foundComponents.find(c => c.type === 'Tissu');
-        const zipReel = foundComponents.find(c => c.type === 'Fermeture');
-        const matiereReelle = tissuReel?.composition || newDesign.matiere;
-        const couleurReelle = tissuReel?.couleur || newDesign.couleur;
-
-        let promptFinal = newDesign.prompt_image;
-        // Remplace matière et couleur demandées par les vraies de la base
-        promptFinal = promptFinal.replace(new RegExp(newDesign.matiere, 'gi'), matiereReelle);
-        promptFinal = promptFinal.replace(new RegExp(newDesign.couleur, 'gi'), couleurReelle);
-        // Remplace la couleur du zip si on en a un réel
-        if (zipReel?.couleur) {
-          promptFinal = promptFinal.replace(/zipper/gi, `${zipReel.couleur} zipper`);
-        }
-
-        const designFinal = {
-          ...newDesign,
-          matiere: matiereReelle,
-          couleur: couleurReelle,
-          prompt_image: promptFinal,
-        };
-
-        // Étape 4 — Génère le rendu avec les vraies matières
-        const renderRes = await fetch('/api/render', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ design: designFinal }),
-        });
-
-        if (!renderRes.ok) throw new Error('Erreur de génération d\'image.');
-        const renderData = await renderRes.json();
-
-        if (renderData.imageUrl) {
-          setRenderedImage(renderData.imageUrl);
-        } else {
-          throw new Error(renderData.error || 'Aucune image générée.');
-        }
-
-        setGeneratingImage(false);
-
-      } else {
-        // Regular conversation
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: chatData.content,
-        }]);
-        setLoading(false);
+        return;
       }
+
+      // Design ready
+      const { design: newDesign, components_needed, message } = chatData.data;
+      setDesign(newDesign);
+      setMessages(prev => [...prev, { role: 'assistant', content: message }]);
+      setLoading(false);
+      setGenerating(true);
+
+      // ── 2. Matching composants Airtable ──────────────────────────────────────
+      const compRes = await fetch('/api/components', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ design: newDesign, components_needed }),
+      });
+      const compData = await compRes.json();
+      const found = compData.components || [];
+      setComponents(found);
+
+      // Notifie les substitutions
+      const similaires  = found.filter(c => c.source === 'similar');
+      const introuvables = found.filter(c => c.source === 'not_found');
+
+      if (similaires.length > 0) {
+        const msg = similaires.map(c =>
+          `Je n'ai pas "${c.needed}" en stock — j'utilise "${c.nom}" qui s'en rapproche.`
+        ).join('\n');
+        setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
+      }
+      if (introuvables.length > 0) {
+        const msg = `Ces composants ne sont pas encore dans ma base : ${introuvables.map(c => c.needed).join(', ')}. Le rendu les montrera de façon générique.`;
+        setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
+      }
+
+      // ── 3. Génération du rendu depuis les vrais composants ───────────────────
+      const renderRes = await fetch('/api/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ design: newDesign, components: found }),
+      });
+      if (!renderRes.ok) throw new Error('Erreur de génération.');
+      const renderData = await renderRes.json();
+
+      if (renderData.imageUrl) {
+        setRenderedImage(renderData.imageUrl);
+      } else {
+        throw new Error(renderData.error || 'Aucune image générée.');
+      }
+
+      setGenerating(false);
 
     } catch (err) {
       console.error(err);
-      setError(err.message);
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `Oups — ${err.message}`,
-      }]);
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Oups — ' + err.message }]);
       setLoading(false);
-      setGeneratingImage(false);
+      setGenerating(false);
     }
   };
 
-  const handleSend = () => sendMessage(input);
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
-  const isBusy = loading || generatingImage;
+  const isBusy = loading || generating;
 
   return (
     <>
       <Head>
         <title>Lucy — L'IA au service de la mode</title>
-        <meta name="description" content="Crée ton vêtement sur mesure avec Lucy, l'IA au service de la mode." />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Jost:wght@200;300;400&display=swap"
-          rel="stylesheet"
-        />
+        <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Jost:wght@200;300;400&display=swap" rel="stylesheet" />
       </Head>
 
       <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: C.ivory, fontFamily: "'Jost', sans-serif" }}>
 
-        {/* ── NAV ── */}
-        <nav style={{
-          padding: '0 40px',
-          height: '60px',
-          borderBottom: `1px solid ${C.beige}`,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexShrink: 0,
-          background: C.ivory,
-        }}>
-          <span style={{
-            fontFamily: "'Cormorant Garamond', serif",
-            fontSize: '20px',
-            fontWeight: 300,
-            letterSpacing: '6px',
-            textTransform: 'uppercase',
-            color: C.noir,
-          }}>Lucy</span>
-          <span style={{
-            fontSize: '10px',
-            fontWeight: 300,
-            letterSpacing: '2.5px',
-            textTransform: 'uppercase',
-            color: C.taupe,
-          }}>L'IA au service de la mode</span>
+        {/* NAV */}
+        <nav style={{ height: 60, padding: '0 40px', borderBottom: '1px solid ' + C.beige, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, background: C.ivory }}>
+          <span style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 20, fontWeight: 300, letterSpacing: 6, textTransform: 'uppercase' }}>Lucy</span>
+          <span style={{ fontSize: 10, fontWeight: 300, letterSpacing: 2.5, textTransform: 'uppercase', color: C.taupe }}>L'IA au service de la mode</span>
         </nav>
 
-        {/* ── MAIN ── */}
-        <div style={{
-          flex: 1,
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          overflow: 'hidden',
-        }}>
+        {/* MAIN */}
+        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', overflow: 'hidden' }}>
 
-          {/* ── LEFT — CHAT ── */}
-          <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            borderRight: `1px solid ${C.beige}`,
-            overflow: 'hidden',
-          }}>
+          {/* LEFT — CHAT */}
+          <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid ' + C.beige, overflow: 'hidden' }}>
+
             {/* Messages */}
-            <div style={{
-              flex: 1,
-              overflowY: 'auto',
-              padding: '28px 28px 16px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '14px',
-            }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px 24px 12px', display: 'flex', flexDirection: 'column', gap: 12 }}>
               {messages.map((msg, i) => (
-                <div
-                  key={i}
-                  style={{
-                    display: 'flex',
-                    justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                    animation: 'fadeIn 0.3s ease',
-                  }}
-                >
+                <div key={i} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
                   {msg.role === 'assistant' && (
-                    <div style={{
-                      width: '26px', height: '26px',
-                      background: C.noir, borderRadius: '50%',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontFamily: "'Cormorant Garamond', serif",
-                      fontSize: '11px', color: C.gold,
-                      marginRight: '10px', flexShrink: 0, marginTop: '2px',
-                    }}>L</div>
+                    <div style={{ width: 26, height: 26, background: C.noir, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: "'Cormorant Garamond', serif", fontSize: 11, color: C.gold, marginRight: 10, flexShrink: 0, marginTop: 2 }}>L</div>
                   )}
-                  <div style={{
-                    maxWidth: '78%',
-                    padding: '11px 15px',
-                    background: msg.role === 'user' ? C.noir : C.beige,
-                    color: msg.role === 'user' ? C.ivory : C.noir,
-                    fontSize: '13px',
-                    fontWeight: 300,
-                    lineHeight: 1.65,
-                    borderRadius: msg.role === 'user'
-                      ? '16px 16px 4px 16px'
-                      : '16px 16px 16px 4px',
-                  }}>
+                  <div style={{ maxWidth: '78%', padding: '10px 14px', background: msg.role === 'user' ? C.noir : C.beige, color: msg.role === 'user' ? C.ivory : C.noir, fontSize: 13, fontWeight: 300, lineHeight: 1.65, borderRadius: msg.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px', whiteSpace: 'pre-wrap' }}>
                     {msg.content}
                   </div>
                 </div>
               ))}
 
               {/* Loading dots */}
-              {loading && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{
-                    width: '26px', height: '26px', background: C.noir, borderRadius: '50%',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontFamily: "'Cormorant Garamond', serif", fontSize: '11px', color: C.gold,
-                  }}>L</div>
-                  <div style={{
-                    padding: '12px 16px', background: C.beige,
-                    borderRadius: '16px 16px 16px 4px',
-                    display: 'flex', gap: '5px', alignItems: 'center',
-                  }}>
+              {(loading || generating) && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ width: 26, height: 26, background: C.noir, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: "'Cormorant Garamond', serif", fontSize: 11, color: C.gold }}>L</div>
+                  <div style={{ padding: '10px 14px', background: C.beige, borderRadius: '16px 16px 16px 4px', display: 'flex', gap: 5 }}>
                     {[0, 1, 2].map(i => (
-                      <div key={i} style={{
-                        width: '6px', height: '6px',
-                        background: C.taupe, borderRadius: '50%',
-                        animation: `bounce 1.2s ease-in-out ${i * 0.2}s infinite`,
-                      }} />
+                      <div key={i} style={{ width: 6, height: 6, background: C.taupe, borderRadius: '50%', animation: 'bounce 1.2s ease-in-out ' + (i * 0.2) + 's infinite' }} />
                     ))}
                   </div>
                 </div>
               )}
-
-              <div ref={messagesEndRef} />
+              <div ref={bottomRef} />
             </div>
 
             {/* Image preview */}
-            {uploadedPreview && (
-              <div style={{
-                padding: '8px 28px',
-                display: 'flex', alignItems: 'center', gap: '10px',
-                borderTop: `1px solid ${C.beige}`,
-              }}>
-                <img
-                  src={uploadedPreview}
-                  alt="référence"
-                  style={{ width: '44px', height: '44px', objectFit: 'cover', borderRadius: '4px' }}
-                />
-                <span style={{ fontSize: '11px', color: C.taupe, letterSpacing: '1px', flex: 1 }}>
-                  Image de référence prête
-                </span>
-                <button
-                  onClick={() => { setUploadedPreview(null); setPendingImage(null); }}
-                  style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    color: C.taupe, fontSize: '18px', lineHeight: 1,
-                  }}
-                >×</button>
+            {preview && (
+              <div style={{ padding: '8px 24px', display: 'flex', alignItems: 'center', gap: 10, borderTop: '1px solid ' + C.beige }}>
+                <img src={preview} alt="ref" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 4 }} />
+                <span style={{ fontSize: 11, color: C.taupe, flex: 1 }}>Image de référence</span>
+                <button onClick={() => { setPreview(null); setPendingImg(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.taupe, fontSize: 20 }}>×</button>
               </div>
             )}
 
-            {/* Input bar */}
-            <div style={{
-              padding: '16px 28px',
-              borderTop: `1px solid ${C.beige}`,
-              background: C.ivory,
-              flexShrink: 0,
-            }}>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
-
-                {/* Upload button */}
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isBusy}
-                  title="Uploader une image de référence"
-                  style={{
-                    width: '42px', height: '42px', flexShrink: 0,
-                    background: C.beige,
-                    border: `1px solid ${C.sand}`,
-                    borderRadius: '6px',
-                    cursor: isBusy ? 'not-allowed' : 'pointer',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '17px',
-                    opacity: isBusy ? 0.5 : 1,
-                    transition: 'opacity 0.2s',
-                  }}
-                >🖼</button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp,image/gif"
-                  onChange={handleImageSelect}
-                  style={{ display: 'none' }}
-                />
-
-                {/* Text input */}
+            {/* Input */}
+            <div style={{ padding: '14px 24px', borderTop: '1px solid ' + C.beige, background: C.ivory, flexShrink: 0 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                <button onClick={() => fileRef.current?.click()} disabled={isBusy} style={{ width: 42, height: 42, background: C.beige, border: '1px solid ' + C.sand, borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', fontSize: 17, opacity: isBusy ? 0.5 : 1, flexShrink: 0 }}>🖼</button>
+                <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
                 <textarea
-                  ref={textareaRef}
                   value={input}
                   onChange={e => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Décris ton vêtement... (Ex: veste noire oversize en coton)"
+                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                  placeholder="Décris ton vêtement..."
                   disabled={isBusy}
                   rows={1}
-                  style={{
-                    flex: 1,
-                    padding: '11px 14px',
-                    background: C.beige,
-                    border: `1px solid ${C.sand}`,
-                    borderRadius: '6px',
-                    fontFamily: "'Jost', sans-serif",
-                    fontSize: '13px', fontWeight: 300,
-                    color: C.noir,
-                    resize: 'none',
-                    height: '42px',
-                    lineHeight: '20px',
-                    opacity: isBusy ? 0.6 : 1,
-                  }}
+                  style={{ flex: 1, padding: '11px 14px', background: C.beige, border: '1px solid ' + C.sand, borderRadius: 6, fontFamily: "'Jost', sans-serif", fontSize: 13, fontWeight: 300, color: C.noir, resize: 'none', height: 42, lineHeight: '20px', outline: 'none', opacity: isBusy ? 0.6 : 1 }}
                 />
-
-                {/* Send button */}
                 <button
-                  onClick={handleSend}
-                  disabled={isBusy || (!input.trim() && !pendingImage)}
-                  style={{
-                    width: '42px', height: '42px', flexShrink: 0,
-                    background: (isBusy || (!input.trim() && !pendingImage)) ? C.sand : C.noir,
-                    border: 'none', borderRadius: '6px',
-                    cursor: (isBusy || (!input.trim() && !pendingImage)) ? 'not-allowed' : 'pointer',
-                    color: C.ivory, fontSize: '18px',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    transition: 'background 0.2s',
-                  }}
+                  onClick={send}
+                  disabled={isBusy || (!input.trim() && !pendingImg)}
+                  style={{ width: 42, height: 42, background: (isBusy || (!input.trim() && !pendingImg)) ? C.sand : C.noir, border: 'none', borderRadius: 6, cursor: (isBusy || (!input.trim() && !pendingImg)) ? 'not-allowed' : 'pointer', color: C.ivory, fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
                 >
-                  {loading ? (
-                    <div style={{
-                      width: '16px', height: '16px',
-                      border: `2px solid rgba(255,255,255,0.3)`,
-                      borderTop: `2px solid ${C.ivory}`,
-                      borderRadius: '50%',
-                      animation: 'spin 0.8s linear infinite',
-                    }} />
-                  ) : '→'}
+                  {loading ? '⟳' : '→'}
                 </button>
               </div>
-              <div style={{
-                marginTop: '8px',
-                fontSize: '10px', fontWeight: 300,
-                letterSpacing: '1px', color: C.taupe,
-                textAlign: 'center',
-              }}>
-                Entrée pour envoyer · ⇧ Entrée pour retour à la ligne
-              </div>
+              <div style={{ marginTop: 6, fontSize: 10, color: C.taupe, textAlign: 'center', letterSpacing: 1 }}>Entrée pour envoyer · ⇧+Entrée pour saut de ligne</div>
             </div>
           </div>
 
-          {/* ── RIGHT — RENDER + COMPOSANTS ── */}
-          <div style={{ overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+          {/* RIGHT — RENDU + COMPOSANTS */}
+          <div style={{ overflowY: 'auto', padding: 28, display: 'flex', flexDirection: 'column', gap: 24 }}>
 
-            {/* Image zone */}
-            <div style={{
-              background: C.beige,
-              borderRadius: '4px',
-              minHeight: '380px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              position: 'relative',
-              overflow: 'hidden',
-              flexShrink: 0,
-            }}>
+            {/* Zone image */}
+            <div style={{ background: C.beige, borderRadius: 4, minHeight: 400, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', flexShrink: 0 }}>
               {renderedImage ? (
-                <img
-                  src={renderedImage}
-                  alt="Rendu Lucy"
-                  style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: '4px', animation: 'fadeIn 0.5s ease' }}
-                />
-              ) : generatingImage ? (
-                <div style={{ textAlign: 'center', padding: '40px' }}>
-                  <div style={{
-                    width: '40px', height: '40px',
-                    border: `2px solid ${C.sand}`,
-                    borderTop: `2px solid ${C.gold}`,
-                    borderRadius: '50%',
-                    animation: 'spin 1s linear infinite',
-                    margin: '0 auto 20px',
-                  }} />
-                  <div style={{
-                    fontFamily: "'Cormorant Garamond', serif",
-                    fontSize: '18px', fontWeight: 300,
-                    color: C.mink, letterSpacing: '2px', marginBottom: '8px',
-                  }}>
-                    Génération en cours...
-                  </div>
-                  <div style={{ fontSize: '10px', color: C.taupe, letterSpacing: '1.5px', textTransform: 'uppercase' }}>
-                    ~20 secondes
-                  </div>
+                <img src={renderedImage} alt="Rendu Lucy" style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: 4 }} />
+              ) : generating ? (
+                <div style={{ textAlign: 'center', padding: 40 }}>
+                  <div style={{ width: 40, height: 40, border: '2px solid ' + C.sand, borderTop: '2px solid ' + C.gold, borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 20px' }} />
+                  <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 18, fontWeight: 300, color: C.mink, letterSpacing: 2, marginBottom: 8 }}>Création du rendu...</div>
+                  <div style={{ fontSize: 10, color: C.taupe, letterSpacing: 1.5, textTransform: 'uppercase' }}>Shooting photo en cours ✦</div>
                 </div>
               ) : (
-                <div style={{ textAlign: 'center', padding: '40px' }}>
-                  <div style={{
-                    fontFamily: "'Cormorant Garamond', serif",
-                    fontSize: '72px', fontWeight: 300,
-                    color: 'rgba(0,0,0,0.05)', letterSpacing: '4px', lineHeight: 1,
-                  }}>L</div>
-                  <div style={{
-                    fontSize: '10px', fontWeight: 300,
-                    letterSpacing: '2.5px', textTransform: 'uppercase',
-                    color: C.taupe, marginTop: '16px',
-                  }}>Le rendu apparaîtra ici</div>
+                <div style={{ textAlign: 'center', padding: 40 }}>
+                  <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 80, fontWeight: 300, color: 'rgba(0,0,0,0.04)', lineHeight: 1 }}>L</div>
+                  <div style={{ fontSize: 10, fontWeight: 300, letterSpacing: 2.5, textTransform: 'uppercase', color: C.taupe, marginTop: 16 }}>Le rendu apparaîtra ici</div>
                 </div>
               )}
             </div>
 
             {/* Design summary */}
             {design && (
-              <div style={{ animation: 'fadeIn 0.4s ease' }}>
-                <div style={{
-                  fontSize: '10px', fontWeight: 300, letterSpacing: '3px',
-                  textTransform: 'uppercase', color: C.gold, marginBottom: '10px',
-                }}>Ton design</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  {[
-                    ['Type', design.type],
-                    ['Matière', design.matiere],
-                    ['Coupe', design.coupe],
-                    ['Couleur', design.couleur],
-                    ['Style', design.style],
-                    ['Détails', design.details],
-                  ].filter(([, v]) => v).map(([label, value]) => (
-                    <div key={label} style={{ display: 'flex', gap: '12px', fontSize: '12px', lineHeight: 1.5 }}>
-                      <span style={{ color: C.taupe, fontWeight: 300, width: '58px', flexShrink: 0 }}>{label}</span>
-                      <span style={{ color: C.noir, fontWeight: 300 }}>{value}</span>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 300, letterSpacing: 3, textTransform: 'uppercase', color: C.gold, marginBottom: 10 }}>Ton design</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {[['Type', design.type], ['Matière', design.matiere], ['Coupe', design.coupe], ['Couleur', design.couleur], ['Style', design.style]].filter(([, v]) => v).map(([k, v]) => (
+                    <div key={k} style={{ display: 'flex', gap: 12, fontSize: 12, lineHeight: 1.5 }}>
+                      <span style={{ color: C.taupe, width: 58, flexShrink: 0 }}>{k}</span>
+                      <span style={{ color: C.noir }}>{v}</span>
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* Components */}
+            {/* Composants */}
             {components.length > 0 && (
-              <div style={{ animation: 'fadeIn 0.4s ease' }}>
-                <div style={{
-                  fontSize: '10px', fontWeight: 300, letterSpacing: '3px',
-                  textTransform: 'uppercase', color: C.gold, marginBottom: '12px',
-                }}>Composants utilisés</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 300, letterSpacing: 3, textTransform: 'uppercase', color: C.gold, marginBottom: 12 }}>Composants du vêtement</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {components.map((comp, i) => {
-                    const sourceBg = {
-                      base:     C.green,
-                      similar:  C.gold,
-                      web:      C.steel || '#457B9D',
-                      a_creer:  C.taupe,
-                    }[comp.source] || C.taupe;
-
+                    const badge = BADGE[comp.source] || BADGE.not_found;
                     return (
-                      <div key={i} style={{
-                        padding: '12px 14px',
-                        background: C.beige,
-                        borderRadius: '4px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '12px',
-                        border: `1px solid ${C.sand}`,
-                      }}>
+                      <div key={i} style={{ padding: '12px 14px', background: C.beige, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 12, border: '1px solid ' + C.sand }}>
                         {comp.photo ? (
-                          <img
-                            src={comp.photo}
-                            alt={comp.nom}
-                            style={{ width: '38px', height: '38px', objectFit: 'cover', borderRadius: '3px', flexShrink: 0 }}
-                          />
+                          <img src={comp.photo} alt={comp.nom} style={{ width: 42, height: 42, objectFit: 'cover', borderRadius: 3, flexShrink: 0 }} />
                         ) : (
-                          <div style={{
-                            width: '38px', height: '38px', background: C.sand,
-                            borderRadius: '3px', flexShrink: 0,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            fontSize: '16px',
-                          }}>🧵</div>
+                          <div style={{ width: 42, height: 42, background: C.sand, borderRadius: 3, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>🧵</div>
                         )}
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: '12px', fontWeight: 400, color: C.noir, marginBottom: '3px' }}>
-                            {comp.nom}
+                          <div style={{ fontSize: 12, fontWeight: 400, color: C.noir, marginBottom: 2 }}>{comp.nom || comp.needed}</div>
+                          <div style={{ fontSize: 10, color: C.taupe, marginBottom: 5 }}>
+                            {[comp.type, comp.composition, comp.couleur, comp.prix].filter(Boolean).join(' · ')}
                           </div>
-                          <div style={{ fontSize: '10px', fontWeight: 300, color: C.taupe, letterSpacing: '0.5px', marginBottom: '5px' }}>
-                            {[comp.type, comp.composition, comp.prix].filter(Boolean).join(' · ')}
-                          </div>
-                          {/* Source badge */}
-                          <span style={{
-                            display: 'inline-block',
-                            padding: '2px 7px',
-                            background: sourceBg,
-                            color: '#fff',
-                            fontSize: '9px',
-                            fontWeight: 300,
-                            letterSpacing: '1px',
-                            borderRadius: '3px',
-                          }}>
-                            {comp.sourceLabel}
+                          <span style={{ display: 'inline-block', padding: '2px 7px', background: badge.bg, color: '#fff', fontSize: 9, letterSpacing: 1, borderRadius: 3 }}>
+                            {badge.label}
                           </span>
-                          {comp.originalNeed && comp.source === 'similar' && (
-                            <div style={{ fontSize: '9px', color: C.taupe, marginTop: '3px', fontStyle: 'italic' }}>
-                              Recherché : {comp.originalNeed}
-                            </div>
+                          {comp.source === 'similar' && (
+                            <div style={{ fontSize: 9, color: C.taupe, marginTop: 3, fontStyle: 'italic' }}>Demandé : {comp.needed}</div>
+                          )}
+                          {comp.source === 'not_found' && (
+                            <div style={{ fontSize: 9, color: C.taupe, marginTop: 3, fontStyle: 'italic' }}>Ce composant sera à sourcer à Guangzhou</div>
                           )}
                         </div>
                       </div>
@@ -599,64 +302,23 @@ export default function Lucy() {
               </div>
             )}
 
-            {/* No components found message */}
-            {design && components.length === 0 && !generatingImage && (
-              <div style={{
-                padding: '16px', background: C.beige, borderRadius: '4px',
-                fontSize: '12px', color: C.taupe, fontWeight: 300, lineHeight: 1.6,
-              }}>
-                Aucun composant exact trouvé dans la base — enrichis ta base Airtable pour plus de résultats.
-              </div>
-            )}
-
-            {/* Order buttons */}
+            {/* Boutons commander */}
             {renderedImage && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', animation: 'fadeIn 0.5s ease' }}>
-                <div style={{
-                  fontSize: '10px', fontWeight: 300, letterSpacing: '3px',
-                  textTransform: 'uppercase', color: C.gold, marginBottom: '2px',
-                }}>Prêt à concrétiser ?</div>
-
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontSize: 10, fontWeight: 300, letterSpacing: 3, textTransform: 'uppercase', color: C.gold }}>Prêt à concrétiser ?</div>
                 <a
-                  href={`mailto:${process.env.NEXT_PUBLIC_CONTACT_EMAIL || 'contact@lucy.ai'}?subject=Commander mon vêtement Lucy&body=Bonjour, je souhaite commander le vêtement suivant:%0A%0AType: ${design?.type || ''}%0AMatière: ${design?.matiere || ''}%0ACoupe: ${design?.coupe || ''}%0ACouleur: ${design?.couleur || ''}%0ADétails: ${design?.details || ''}`}
-                  style={{
-                    display: 'block',
-                    padding: '15px 24px',
-                    background: C.noir, color: C.ivory,
-                    textDecoration: 'none', textAlign: 'center',
-                    fontSize: '11px', fontWeight: 300,
-                    letterSpacing: '2.5px', textTransform: 'uppercase',
-                    borderRadius: '4px',
-                    transition: 'background 0.2s',
-                  }}
-                  onMouseEnter={e => e.target.style.background = C.mink}
-                  onMouseLeave={e => e.target.style.background = C.noir}
+                  href={'mailto:' + (process.env.NEXT_PUBLIC_CONTACT_EMAIL || 'contact@lucy.ai') + '?subject=Commander mon vêtement Lucy&body=Type: ' + (design?.type || '') + '%0AMatière: ' + (design?.matiere || '') + '%0ACoupe: ' + (design?.coupe || '') + '%0ACouleur: ' + (design?.couleur || '')}
+                  style={{ display: 'block', padding: '15px 24px', background: C.noir, color: C.ivory, textDecoration: 'none', textAlign: 'center', fontSize: 11, fontWeight: 300, letterSpacing: 2.5, textTransform: 'uppercase', borderRadius: 4 }}
                 >
                   👕 Commander mon vêtement
                 </a>
-
                 <a
-                  href={`mailto:${process.env.NEXT_PUBLIC_CONTACT_EMAIL || 'contact@lucy.ai'}?subject=Commander des échantillons Lucy&body=Bonjour, je souhaite commander des échantillons des matières suivantes:%0A%0AType: ${design?.type || ''}%0AMatière: ${design?.matiere || ''}%0ACouleur: ${design?.couleur || ''}`}
-                  style={{
-                    display: 'block',
-                    padding: '15px 24px',
-                    background: 'transparent', color: C.noir,
-                    textDecoration: 'none', textAlign: 'center',
-                    fontSize: '11px', fontWeight: 300,
-                    letterSpacing: '2.5px', textTransform: 'uppercase',
-                    border: `1px solid ${C.sand}`,
-                    borderRadius: '4px',
-                  }}
+                  href={'mailto:' + (process.env.NEXT_PUBLIC_CONTACT_EMAIL || 'contact@lucy.ai') + '?subject=Commander des échantillons Lucy&body=Matière: ' + (design?.matiere || '') + '%0ACouleur: ' + (design?.couleur || '')}
+                  style={{ display: 'block', padding: '15px 24px', background: 'transparent', color: C.noir, textDecoration: 'none', textAlign: 'center', fontSize: 11, fontWeight: 300, letterSpacing: 2.5, textTransform: 'uppercase', border: '1px solid ' + C.sand, borderRadius: 4 }}
                 >
                   🧵 Commander des échantillons
                 </a>
-
-                <p style={{
-                  fontSize: '10px', fontWeight: 300, color: C.taupe,
-                  textAlign: 'center', letterSpacing: '0.5px', lineHeight: 1.5,
-                }}>
-                  Tu peux aussi continuer à affiner ton design en écrivant à Lucy.
-                </p>
+                <p style={{ fontSize: 10, color: C.taupe, textAlign: 'center', lineHeight: 1.5 }}>Tu peux continuer à affiner ton design en écrivant à Lucy.</p>
               </div>
             )}
           </div>
