@@ -1,16 +1,17 @@
 export const config = {
   api: { responseLimit: false },
 };
-
+ 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
-
+ 
   const { design, components } = req.body;
-
+ 
   try {
-    // Build prompt ONLY from real Airtable components
-    const prompt = buildPrompt(design, components);
-
+    // ── ÉTAPE 1 : Claude construit le prompt depuis les vrais composants ────────
+    const imagePrompt = await buildPromptWithClaude(design, components);
+ 
+    // ── ÉTAPE 2 : Replicate génère l'image ─────────────────────────────────────
     const startRes = await fetch(
       'https://api.replicate.com/v1/models/black-forest-labs/flux-1.1-pro/predictions',
       {
@@ -22,7 +23,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           input: {
-            prompt,
+            prompt: imagePrompt,
             width: 832,
             height: 1216,
             output_format: 'jpg',
@@ -32,18 +33,17 @@ export default async function handler(req, res) {
         }),
       }
     );
-
+ 
     if (!startRes.ok) throw new Error('Replicate error: ' + await startRes.text());
-
     const prediction = await startRes.json();
-
+ 
     if (prediction.output) {
       const url = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output;
-      return res.status(200).json({ imageUrl: url, prompt });
+      return res.status(200).json({ imageUrl: url, prompt: imagePrompt });
     }
-
+ 
     if (!prediction.id) throw new Error('No prediction ID');
-
+ 
     // Poll
     let imageUrl = null;
     for (let i = 0; i < 40; i++) {
@@ -58,61 +58,83 @@ export default async function handler(req, res) {
       }
       if (pollData.status === 'failed') throw new Error('Generation failed: ' + pollData.error);
     }
-
+ 
     if (!imageUrl) throw new Error('Timeout — réessaie.');
-    res.status(200).json({ imageUrl, prompt });
-
+    res.status(200).json({ imageUrl, prompt: imagePrompt });
+ 
   } catch (error) {
     console.error('Render error:', error);
     res.status(500).json({ error: error.message });
   }
 }
-
-// ── Build prompt from REAL components only ────────────────────────────────────
-function buildPrompt(design, components) {
-  // Only use components that exist in the DB (exact or similar)
+ 
+// ── Claude construit le prompt image depuis les vrais composants Airtable ─────
+async function buildPromptWithClaude(design, components) {
+ 
+  // Résumé des composants réels disponibles
   const available = components.filter(c => c.source === 'exact' || c.source === 'similar');
   const notFound  = components.filter(c => c.source === 'not_found');
-
-  const tissu    = available.find(c => c.category === 'Tissu');
-  const zip      = available.find(c => c.category === 'Fermeture');
-  const bouton   = available.find(c => c.category === 'Bouton');
-  const doublure = available.find(c => c.category === 'Doublure');
-
-  // Use REAL colors and materials from DB, fallback to design if nothing found
-  const couleur  = tissu?.couleur  || design.couleur  || 'black';
-  const matiere  = tissu?.composition || design.matiere || 'fabric';
-  const coupe    = design.coupe || 'regular';
-  const type     = design.type  || 'garment';
-  const style    = design.style || '';
-
-  // Build detailed description from real components
-  const details = [];
-  if (zip)      details.push((zip.couleur || '') + ' zipper closure');
-  if (bouton)   details.push((bouton.couleur || '') + ' buttons');
-  if (doublure) details.push((doublure.composition || '') + ' lining');
-
-  // For not-found components, show a neutral/generic version
-  const notFoundNote = notFound.length > 0
-    ? 'generic ' + notFound.map(c => c.category.toLowerCase()).join(', ')
+ 
+  const componentsSummary = available.map(c => {
+    return `- ${c.category} : "${c.nom}" | couleur: ${c.couleur || 'non précisée'} | composition: ${c.composition || 'non précisée'}`;
+  }).join('\n');
+ 
+  const notFoundSummary = notFound.length > 0
+    ? 'Composants absents de la base (rendu générique) : ' + notFound.map(c => c.needed).join(', ')
     : '';
-
-  const prompt = [
-    'Ultra-realistic fashion editorial photography',
-    'full garment visible, nothing cropped',
-    coupe + ' fit',
-    couleur,
-    matiere,
-    style,
-    type,
-    details.join(', '),
-    notFoundNote,
-    'detailed fabric texture and stitching visible',
-    'shot on a professional model in a high-end studio',
-    'dramatic editorial lighting, sharp focus, photorealistic',
-    'Vogue fashion shoot quality',
-    'full body shot showing the complete garment from collar to hem',
-  ].filter(Boolean).join(', ');
-
-  return prompt;
+ 
+  const systemMsg = [
+    'Tu es un directeur artistique de mode expert en prompt engineering pour IA générative.',
+    'Tu dois créer un prompt en anglais pour générer une photo de vêtement ultra-réaliste.',
+    '',
+    'RÈGLES ABSOLUES :',
+    '- Le prompt doit décrire EXACTEMENT les composants listés ci-dessous, avec leurs vraies couleurs',
+    '- Chaque composant visible doit être décrit avec précision dans le prompt',
+    '- Le vêtement doit être VU EN ENTIER, rien de coupé, du col au bas',
+    '- Qualité photo éditoriale Vogue, shooting professionnel, lumière dramatique',
+    '- Réponds UNIQUEMENT avec le prompt en anglais, rien d\'autre, pas de markdown',
+  ].join('\n');
+ 
+  const userMsg = [
+    'Crée un prompt image pour ce vêtement :',
+    '',
+    'TYPE : ' + design.type,
+    'COUPE : ' + design.coupe,
+    'STYLE : ' + (design.style || 'classique'),
+    '',
+    'COMPOSANTS RÉELS DISPONIBLES EN BASE :',
+    componentsSummary || 'Aucun composant trouvé',
+    '',
+    notFoundSummary,
+    '',
+    'Le prompt doit intégrer chaque composant avec sa vraie couleur et matière.',
+    'Exemple : si zip rouge → "prominent red zipper clearly visible"',
+    'Si tissu noir coton → "black cotton fabric with visible texture"',
+  ].join('\n');
+ 
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 500,
+      system: systemMsg,
+      messages: [{ role: 'user', content: userMsg }],
+    }),
+  });
+ 
+  if (!response.ok) {
+    // Fallback prompt si Claude échoue
+    const c = design.couleur || 'black';
+    const m = design.matiere || 'fabric';
+    const t = design.type    || 'garment';
+    return `Ultra-realistic fashion editorial photography, full ${c} ${m} ${t} visible from collar to hem, Vogue quality, professional studio lighting, photorealistic 8k`;
+  }
+ 
+  const data = await response.json();
+  return data.content[0].text.trim();
 }
